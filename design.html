@@ -9,6 +9,273 @@
     <title>
         Code Snippet Generator
     </title>
+    <script lang="javascript">
+        snippetID = null; // Current snippet ID (null for new snippet)
+        snippets = []; // List of snippets
+
+        window.onload = function () {
+            document.querySelectorAll("a, button").forEach(x => { x.style.transition = "filter 0.5s"; });
+        };
+
+        function highlightElement(element, language) {
+            // Remove all language-* classes
+            element.classList.forEach(function (className) {
+                if (className.startsWith("language-")) {
+                    element.classList.remove(className);
+                }
+            });
+
+            // Reset the highlighted flag (neccesarry for dynamic highlighting)
+            element.removeAttribute("data-highlighted");
+
+            if (language) {
+                element.classList.add(`language-${language}`);
+                element.setAttribute("data-language", language);
+                // Highlight the element with HLJS
+                hljs.highlightElement(element, language = language);
+            }
+            else {
+                // Highlight the element with HLJS using auto-detection
+                hljs.highlightElement(element);
+            }
+        }
+
+        function disableInput(blur = "0.3rem", filter = []) {
+            document.querySelectorAll("a, button").forEach(x => { if (!filter.includes(x)) { x.style.filter = `blur(${blur})`; x.style.pointerEvents = "none"; } });
+        }
+
+        function enableInput() {
+            document.querySelectorAll("a, button").forEach(x => { x.style.filter = ""; x.style.pointerEvents = ""; });
+        }
+
+        function stream(system, input, element, show = [element], showOnFinish = [], callback = null) {
+            // Overriding the default values
+            if (show == undefined) {
+                show = [element];
+            }
+            if (showOnFinish == undefined) {
+                showOnFinish = [];
+            }
+            // Disable all input elements until the stream is finished
+            disableInput();
+            // Register user's prompt and obtain the generation ID
+            fetch("/prompt", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ "system": system, "input": input })
+            }).then(response => response.json()).then(data => {
+                // Read the obtained generation ID
+                generation_id = data.id;
+                // Connect to the server-sent event endpoint by providing the corresponding generation ID
+                const eventSource = new EventSource(`/stream?id=${generation_id}`);
+                // Listen for the append event
+                eventSource.addEventListener("append", function (event) {
+                    const data = JSON.parse(event.data);
+                    // Show all relevant elements
+                    show.forEach(x => { x.classList.remove("hidden"); });
+                    // Append the content to the element
+                    element.textContent = data.content;
+                    // Reset the highlighted flag (neccesarry for subsequent highlighting of the same element)
+                    element.removeAttribute("data-highlighted");
+                    if (element.getAttribute("data-language")) {
+                        // Highlight the code block with the specified language
+                        highlightElement(element, language = element.getAttribute("data-language"));
+                    } else {
+                        // Highlight the code block with auto-detection
+                        highlightElement(element);
+                    }
+                });
+                // Listen for the detected language event
+                eventSource.addEventListener("language", function (event) {
+                    const data = JSON.parse(event.data);
+                    // Highlight the code block
+                    highlightElement(element, language = data.language);
+                });
+                // Listen for the end event
+                eventSource.addEventListener("end", function (event) {
+                    eventSource.close();
+                    enableInput();
+                    // Show all relevant elements on finish
+                    showOnFinish.forEach(x => { x.classList.remove("hidden"); });
+                    if (callback) {
+                        callback();
+                    }
+                });
+            }).catch(error => {
+                console.error(error);
+            });
+        }
+
+        function toggleRuntimeTests(codeElement, onlyHide = false) {
+            const language = codeElement.getAttribute("data-language");
+            if (language.toLocaleLowerCase() == "python" && !onlyHide) {
+                // Show runtime tests for Python
+                document.getElementById("div-tests-runtime").classList.remove("hidden");
+            }
+            else {
+                // Hide runtime tests for non-Python languages
+                document.getElementById("div-tests-runtime").classList.add("hidden");
+            }
+            // Hide the test results
+            document.getElementById("div-tests-result").classList.add("hidden");
+            // Hide the regenerate button
+            document.getElementById("button-regenerate-after-failure").classList.add("hidden");
+        }
+
+        function generateCode() {
+            // Reset
+            document.getElementById("pre-code-generation").classList.add("hidden");
+            document.getElementById("input-feedback").value = "";
+            document.getElementById("input-tests-feedback").value = "";
+            // Hide other sections
+            document.getElementById("div-feedback").classList.add("hidden");
+            document.getElementById("button-generate-test-cases").classList.add("hidden");
+            document.getElementById("div-test-cases").classList.add("hidden");
+            // Stream the code generation
+            const descriptionElement = document.getElementById("textarea-description");
+            const description = descriptionElement.value.trim();
+            if (description != "") {
+                stream("You are a code assistant. Generate code corresponding to user request. Provide concise code implementations without test cases or usage examples, unless the user specifically requests them. Output using markdown code block with target programming language specified.",
+                    description, // User prompt
+                    document.getElementById("code-generation"), // Code itself
+                    show = [document.getElementById("pre-code-generation")],
+                    showOnFinish = [document.getElementById("div-feedback"),
+                    document.getElementById("button-generate-test-cases")],
+                    callback = () => { toggleRuntimeTests(document.getElementById("code-generation"), onlyHide = true); });
+            }
+        }
+
+        function improveCode() {
+            const codeElement = document.getElementById("code-generation");
+            const code = codeElement.textContent.trim();
+            const feedbackElement = document.getElementById("input-feedback");
+            const feedback = feedbackElement.value.trim();
+            const language = codeElement.getAttribute("data-language");
+            if (code != "" && feedback != "") {
+                stream(`You are a code assistant. Improve the following code snippet in ${language} based on user feedback. Provide concise code implementations without test cases or usage examples, unless the user specifically requests them. Output using markdown code block with target programming language specified:\n${code}`,
+                    feedback, // User prompt
+                    document.getElementById("code-generation"), // Code itself
+                    undefined, // Default value
+                    undefined, // Default value
+                    callback = () => { toggleRuntimeTests(document.getElementById("code-generation")); });
+            }
+        }
+
+        function generateTests() {
+            const codeElement = document.getElementById("code-generation");
+            const code = codeElement.textContent.trim();
+            const language = codeElement.getAttribute("data-language");
+            // Hide test cases manipulation section until the next generation
+            document.getElementById("div-test-cases-manipulations").classList.add("hidden");
+            // Stream the test cases generation
+            if (code != "") {
+                addition = language == "python" ? "Use assertions instead of printing. " : ""; // Additional instructions for Python
+                stream(`You are a code assistant. Generate test cases for the following code snippet in ${language}. ${addition}Output using markdown code block.`,
+                    code, // User prompt
+                    document.getElementById("code-tests"), // Test caese
+                    show = [document.getElementById("div-test-cases")],
+                    showOnFinish = [document.getElementById("div-test-cases-manipulations")],
+                    callback = () => { toggleRuntimeTests(document.getElementById("code-tests")); });
+            }
+        }
+
+        function improveTests() {
+            const testsElement = document.getElementById("code-tests"); // Test cases
+            const tests = testsElement.textContent.trim();
+            const feedbackElement = document.getElementById("input-tests-feedback");
+            const feedback = feedbackElement.value.trim();
+            const language = testsElement.getAttribute("data-language");
+            // Hide test cases manipulation section until the next generation
+            document.getElementById("div-test-cases-manipulations").classList.add("hidden");
+            // Stream the improved test cases generation
+            if (tests != "" && feedback != "") {
+                addition = language == "python" ? "Use assertions instead of printing. " : ""; // Additional instructions for Python
+                stream(`You are a code assistant. Improve the following test cases in ${language} based on user feedback. ${addition}Exclude the original implementation itself in the output and output only improved test cases. Ensure tests are reachable and executed correctly. Output using markdown code block:\n${tests}`,
+                    feedback,
+                    document.getElementById("code-tests"),
+                    show = [document.getElementById("div-test-cases")],
+                    showOnFinish = [document.getElementById("div-test-cases-manipulations")],
+                    callback = () => { toggleRuntimeTests(document.getElementById("code-tests")); });
+            }
+        }
+
+        function runTests() {
+            const codeElement = document.getElementById("code-generation");
+            const code = codeElement.textContent.trim();
+            const testsElement = document.getElementById("code-tests");
+            const tests = testsElement.textContent.trim();
+            const language = testsElement.getAttribute("data-language");
+            if (tests != "" && language.toLocaleLowerCase() == "python") {
+                fetch("/execute", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ "source": `${code}\n${tests}`, "language": language })
+                }).then(response => response.json()).then(data => {
+                    // Show the test results
+                    const resultElement = document.getElementById("div-tests-result");
+                    resultElement.classList.remove("bg-green-300");
+                    resultElement.classList.remove("bg-red-300");
+                    resultElement.classList.add(data.exit_code == 0 ? "bg-green-300" : "bg-red-300");
+                    resultElement.textContent = data.exit_code == 0 ? "Code Executed Successfully" : "Code Execution Failed";
+                    resultElement.classList.remove("hidden");
+                    // Enable the regenerate button if the code execution failed
+                    const regenerateButton = document.getElementById("button-regenerate-after-failure");
+                    regenerateButton.disabled = data.exit_code == 0;
+                    if (data.exit_code != 0) {
+                        regenerateButton.classList.remove("hidden");
+                    }
+                    else {
+                        regenerateButton.classList.add("hidden");
+                    }
+                }).catch(error => {
+                    console.error(error);
+                });
+            }
+        }
+
+        function regenerateAfterFailure() {
+            const descriptionElement = document.getElementById("textarea-description");
+            const description = descriptionElement.value.trim();
+            const codeElement = document.getElementById("code-generation");
+            const code = codeElement.textContent.trim();
+            const testsElement = document.getElementById("code-tests");
+            const tests = testsElement.textContent.trim();
+            const language = testsElement.getAttribute("data-language");
+            // Stream the code generation
+            if (description != "") {
+                stream(`You are a code assistant. Fix the provided code based on failing test cases. Provide concise code implementations in ${language} with only necessary fixes, without adding extra content that didn't exist in the original code, such as usage examples and test cases. Output using markdown code block with target programming language specified.`,
+                    `Original task:\n${description}\n\nOriginal implementation:\n${code}\n\nFailed test cases:\n${tests}`, // User input
+                    document.getElementById("code-generation"), // Code itself
+                    undefined, // Default value
+                    undefined, // Default value
+                    callback = () => { toggleRuntimeTests(document.getElementById("code-generation")); });
+            }
+        }
+
+        function selectSnippet(id) {
+            snippetID = id; // Reset the snippet ID
+            if (id == null) {
+                // Reset the description
+                document.getElementById("textarea-description").value = "";
+                // Reset the code generation
+                document.getElementById("pre-code-generation").classList.add("hidden");
+                document.getElementById("code-generation").textContent = "";
+                // Reset and hide other sections
+                document.getElementById("div-feedback").classList.add("hidden");
+                document.getElementById("input-feedback").value = "";
+                document.getElementById("button-generate-test-cases").classList.add("hidden");
+                document.getElementById("div-test-cases").classList.add("hidden");
+                document.getElementById("code-tests").textContent = "";
+                document.getElementById("input-tests-feedback").value = "";
+                document.getElementById("div-tests-result").classList.add("hidden");
+                document.getElementById("button-regenerate-after-failure").classList.add("hidden");
+            }
+        }
+    </script>
 </head>
 
 <body>
@@ -18,7 +285,7 @@
             <h2 class="font-bold mb-4">
                 Snippets List
             </h2>
-            <button class="mb-4 bg-blue-500 text-white px-4 py-2 rounded">
+            <button class="mb-4 bg-blue-500 text-white px-4 py-2 rounded" onclick="reset();">
                 Create New Snippet
             </button>
             <ul>
@@ -45,49 +312,58 @@
             <h1 class="text-xl font-bold mb-4">
                 Code Snippet Generator
             </h1>
-            <textarea placeholder="Describe your code snippet here..."
+            <textarea id="textarea-description" placeholder="Describe your code snippet here..."
                 class="w-full p-2 border border-gray-300 rounded mb-4" rows="3"></textarea>
-            <button class="w-full bg-green-500 text-white px-4 py-2 rounded mb-4">
+            <button class="w-full bg-green-500 text-white px-4 py-2 rounded mb-4" onclick="generateCode();">
                 Generate Code
             </button>
 
             <!-- Simple Code Highlighter Placeholder for Python -->
-            <pre class="mb-2"><code class="python">def is_even(n):
-    return n % 2</code></pre>
-            <div class="flex justify-between mb-4">
-                <input type="text" placeholder="Provide feedback for regenerating code..."
+            <pre id="pre-code-generation" class="mb-2 hidden"><code id="code-generation"></code></pre>
+            <div id="div-feedback" class="flex justify-between mb-4 hidden">
+                <input type="text" id="input-feedback" placeholder="Provide feedback for regenerating code..."
                     class="flex-grow mr-2 p-2 border border-gray-300 rounded">
-                <button class="bg-blue-500 text-white px-4 py-2 rounded">
+                <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="improveCode();">
                     Improve Code
                 </button>
             </div>
-            <button class="w-full bg-purple-500 text-white px-4 py-2 rounded mb-4">
+
+            <button id="button-generate-test-cases"
+                class="w-full bg-purple-500 text-white px-4 py-2 rounded mb-4 hidden" onclick="generateTests();">
                 Generate Test Cases
             </button>
 
-            <!-- Fancy HR -->
-            <hr class="mb-4 border-t-2 border-gray-300">
+            <div id="div-test-cases" class="hidden">
+                <!-- Fancy HR -->
+                <hr class="mb-4 border-t-2 border-gray-300">
 
-            <!-- Simple Code Highlighter Placeholder for Test Cases -->
-            <pre class="mb-2"><code class="python">assert is_even(8) == True
-assert is_even(3) == False</code></pre>
+                <!-- Simple Code Highlighter Placeholder for Test Cases -->
+                <pre class="mb-2"><code id="code-tests"></code></pre>
 
-            <div class="flex justify-between mb-4">
-                <input type="text" placeholder="Provide feedback for regenerating test cases..."
-                    class="flex-grow mr-2 p-2 border border-gray-300 rounded">
-                <button class="bg-blue-500 text-white px-4 py-2 rounded">
-                    Improve Tests
-                </button>
+                <div id="div-test-cases-manipulations" class="hidden">
+                    <div class="flex justify-between mb-4">
+                        <input type="text" id="input-tests-feedback"
+                            placeholder="Provide feedback for regenerating test cases..."
+                            class="flex-grow mr-2 p-2 border border-gray-300 rounded">
+                        <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="improveTests();">
+                            Improve Tests
+                        </button>
+                    </div>
+                    <div id="div-tests-runtime" class="hidden">
+                        <button class="w-full bg-teal-500 text-white px-4 py-2 rounded mb-4" onclick="runTests();">
+                            Run Test Code
+                        </button>
+                        <div id="div-tests-result" class="bg-green-300 p-4 rounded mb-4 hidden">
+                            Code Executed Successfully
+                        </div>
+                        <button id="button-regenerate-after-failure"
+                            class="w-full bg-gray-500 text-white px-4 py-2 rounded mb-4 hidden"
+                            onclick="regenerateAfterFailure();">
+                            Regenerate
+                        </button>
+                    </div>
+                </div>
             </div>
-            <button class="w-full bg-teal-500 text-white px-4 py-2 rounded mb-4">
-                Run Test Code
-            </button>
-            <div class="bg-green-300 p-4 rounded mb-4">
-                Code Executed Successfully
-            </div>
-            <button class="w-full bg-gray-500 text-white px-4 py-2 rounded mb-4" disabled>
-                Regenerate (Enabled when failed; Send failed feedback to Regenerate)
-            </button>
         </div>
     </div>
 
