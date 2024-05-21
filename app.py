@@ -12,6 +12,15 @@ from uuid import uuid4
 
 app = FastAPI()
 openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+snippets = {}  # All client snippets within timeout
+
+
+# Code snippet model
+class CodeSnippet(BaseModel):
+    description: str
+    source: str
+    title: str
+    language: str
 
 
 # Incoming prompt model
@@ -51,14 +60,14 @@ async def prompt(message: IncomingPrompt):
 
 # Stream LLM completions for a prompt
 @app.get("/stream")
-async def stream(id: str):
+async def stream(id: str, generate_title: bool = False):
     # Remove prompts older than the configured timeout
     for key in list(prompts.keys()):
         if time.time() - prompts[key]["time"] > timeout:
             del prompts[key]
 
     # SSE generator
-    async def stream_response(messages):
+    async def stream_response(messages, title=None):
         def preprocess(
             content: str,
         ) -> str:  # Preprocess the content before sending it to the client
@@ -77,6 +86,15 @@ async def stream(id: str):
                 ).strip()  # Return only code block contents
             else:
                 return content
+
+        # Yield title
+        if title is not None:
+            yield {
+                "event": "title",
+                "data": json.dumps(
+                    {"title": title},
+                ),
+            }
 
         stream = await openai.chat.completions.create(
             model=model,
@@ -115,15 +133,34 @@ async def stream(id: str):
         yield {"event": "end", "data": ""}
 
     if id in prompts:
+        system_prompt = prompts[id]["system"]
+        user_prompt = prompts[id]["input"]
         messages = [
             {
                 "role": "system",
-                "content": prompts[id]["system"],
+                "content": system_prompt,
             },
-            {"role": "user", "content": prompts[id]["input"]},
+            {"role": "user", "content": user_prompt},
         ]
         del prompts[id]
-        return EventSourceResponse(stream_response(messages))
+        # Generate title
+        title = None
+        if generate_title:
+            title_messages = [
+                {
+                    "role": "system",
+                    "content": "Summarize user input by providing as short title as possible (5 words max) while preserving the initial meaning for the following user prompt. Omit the programming language name:",
+                },
+                {"role": "user", "content": user_prompt},
+            ]
+            title_completion = await openai.chat.completions.create(
+                model=model,
+                messages=title_messages,
+            )
+            title = (
+                title_completion.choices[0].message.content.strip().rstrip(".")
+            )  # Remove trailing period
+        return EventSourceResponse(stream_response(messages, title))
     else:
         raise HTTPException(status_code=404, detail="Entry not found")
 
@@ -147,3 +184,49 @@ async def execute(code: IncomingCode):
 
         # Return the exit code of the process
         return {"exit_code": process.exitcode}
+
+
+# REST for Code Snippets
+
+
+# Get all code snippets
+@app.get("/snippets")
+async def get_snippets():
+    return {
+        key: {"title": value["title"], "language": value["language"]}
+        for key, value in snippets.items()
+    }
+
+
+# Create a new code snippet
+@app.post("/snippet")
+async def post_snippet(snippet: CodeSnippet):
+    id = 0
+    while id in snippets:
+        id += 1
+    snippets[id] = {
+        "description": snippet.description,
+        "source": snippet.source,
+        "title": snippet.title,
+        "language": snippet.language.capitalize(),
+    }
+    return {"id": id}
+
+
+# Get a code snippet
+@app.get("/snippet/{id}")
+async def get_snippet(id: int):
+    if id in snippets:
+        return snippets[id]
+    else:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+
+# Delete a code snippet
+@app.delete("/snippet/{id}")
+async def delete_snippet(id: int):
+    if id in snippets:
+        del snippets[id]
+        return {"status": "OK"}
+    else:
+        raise HTTPException(status_code=404, detail="Entry not found")
